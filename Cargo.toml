@@ -1,0 +1,28 @@
+[package]
+name = "netlogger-rs"
+version = "0.0.3"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.6.0", features = ["derive"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+eframe = "0.34.1"
+egui = "0.34.1"
+egui_extras = "0.34.1"
+libbpf-rs = "0.26.1"
+plain = "0.2.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[build-dependencies]
+libbpf-cargo = "0.26.1"
+
+[[bin]]
+name = "netlogger-cli"
+path = "src/bin/netlogger_cli.rs"
+
+[[bin]]
+name = "netlogger-gui"
+path = "src/bin/netlogger_gui.rs"

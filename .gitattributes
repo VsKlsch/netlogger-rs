@@ -1,0 +1,2 @@
+src/bpf/vmlinux.h linguist-generated=true
+src/bpf/program_skel.rs linguist-generated=true
