@@ -34,19 +34,19 @@ fn main() {
 
     let headers_path = manifest_dir.join(HEADERS_DIR_PATH);
 
-    // Check if bpftool exists
-    Command::new("bpftool")
-        .arg("--version")
-        .output()
-        .expect("bpftool not found. Install it: Fedora: dnf install bpftool | Ubuntu: apt install linux-tools-common");
-
     // Check if clang exists
     Command::new("clang").arg("--version").output().expect(
         "clang not found. Install it: Fedora: dnf install clang | Ubuntu: apt install clang",
     );
-
+    
     // Generate vmlinux.h if not present
     if !vmlinux_path.exists() {
+        // Check if bpftool exists
+        Command::new("bpftool")
+            .arg("--version")
+            .output()
+            .expect("bpftool not found. Install it: Fedora: dnf install bpftool | Ubuntu: apt install linux-tools-common");
+
         let output = Command::new("bpftool")
             .arg("btf")
             .arg("dump")

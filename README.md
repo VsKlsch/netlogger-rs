@@ -49,6 +49,17 @@ sudo ./target/release/netlogger-cli --target-pid <PID>
 
 Replace `<PID>` with the PID of the process you want to monitor.
 
+## Interface
+
+### GUI (`netlogger-gui`)
+- Real-time connection table with sorting by any field
+- Address statistics with connection counts
+- IP blocking and unblocking directly from the statistics table
+- Summary panel with total connections and unique addresses
+
+### CLI (`netlogger-cli`)
+- Real-time connection logging to stdout
+
 ## Roadmap
 
 > ⚠️ **Current status: 0.0.3** — approaching first public release.
