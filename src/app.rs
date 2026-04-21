@@ -9,21 +9,19 @@
 //! - [`SortMetricField`] — sort field selector for metrics
 //! - [`SortOrder`] — sort order (ascending or descending)
 
-mod block_control;
+mod profile_control;
 mod event;
 mod metric;
 mod sort_types;
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::sync::mpsc;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 use crate::app::metric::Metrics;
-use crate::bpf::{BlockEvent, Event};
 use crate::config::Config;
 
-use block_control::BlockControl;
+use profile_control::ProfileControl;
 use event::EventBridge;
 
 pub use event::display_event::DisplayEvent;
@@ -38,7 +36,6 @@ use anyhow::Result;
 /// Manages event collection, address metrics, and IP blocking.
 /// Acts as a facade over the BPF communication layer, event storage,
 /// and blocking control.
-#[derive(Debug)]
 pub struct ApplicationContext {
     // Configuration
     max_events_log_size: usize,
@@ -46,7 +43,7 @@ pub struct ApplicationContext {
 
     // Components
     event_bridge: EventBridge,
-    block_control: BlockControl,
+    profile_control: ProfileControl,
 
     // Data
     events: VecDeque<DisplayEvent>,
@@ -71,10 +68,7 @@ impl ApplicationContext {
     /// # Errors
     /// Returns `Err` if any inner component fails to initialize.
     pub fn new(
-        config: &Config,
-        event_rx: mpsc::Receiver<Event>,
-        block_event_sx: mpsc::Sender<BlockEvent>,
-        is_running: Arc<AtomicBool>,
+        config: Config,
     ) -> Result<ApplicationContext> {
         let max_events_log_size = config.max_events_log_size;
         let mut max_events_block_size = config.max_events_block_size;
@@ -93,7 +87,11 @@ impl ApplicationContext {
             max_events_block_size = max_events_log_size;
         }
 
-        let event_bridge = EventBridge::new(max_events_block_size, event_rx, is_running.clone())?;
+        let event_bridge = EventBridge::new(
+            max_events_block_size, 
+            config.event_rx, 
+            config.running_flag.clone()
+        )?;
 
         tracing::info!("Application context is created");
 
@@ -105,7 +103,10 @@ impl ApplicationContext {
             metrics: Metrics::new(),
             start_time: None,
             sort_metric_field: SortMetricField::Ip,
-            block_control: BlockControl::new(block_event_sx),
+            profile_control: ProfileControl::new(
+                config.bpf_program.clone(), 
+                config.base_profile
+            ),
         })
     }
 
@@ -179,23 +180,23 @@ impl ApplicationContext {
         self.max_events_log_size
     }
 
-    pub fn block(&mut self, ip: IpAddr) {
-        self.block_control.block(ip);
+    pub fn add_to_profile(&mut self, ip: IpAddr) {
+        self.profile_control.add(ip);
     }
 
     /// Sends a block command for the given IP address to the BPF layer.
     ///
     /// # Arguments
     /// * `ip` — IP address to block
-    pub fn unblock(&mut self, ip: IpAddr) {
-        self.block_control.unblock(ip);
+    pub fn remove_from_profile(&mut self, ip: IpAddr) {
+        self.profile_control.remove(ip);
     }
 
     /// Sends a unblock command for the given IP address to the BPF layer.
     ///
     /// # Arguments
     /// * `ip` — IP address to unblock
-    pub fn is_blocked(&self, ip: &IpAddr) -> bool {
-        self.block_control.is_blocked(ip)
+    pub fn is_in_profile(&self, ip: &IpAddr) -> bool {
+        self.profile_control.contains(ip)
     }
 }

@@ -1,12 +1,12 @@
-use netlogger_rs::app::*;
-use netlogger_rs::bpf::BPFWorker;
+use netlogger_rs::{app::*, config::ConfigBuilder};
 use netlogger_rs::config::Config;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
+    atomic::{AtomicBool, Ordering}
 };
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -21,8 +21,7 @@ struct Args {
 
 struct App {
     app_context: ApplicationContext,
-    _bpf_worker: BPFWorker,
-    _config: Config,
+    bpf_worker: Option<JoinHandle<Result<()>>>,
     running_flag: Arc<AtomicBool>,
     current_event_sort_field: SortEventField,
     current_event_sort_order: SortOrder,
@@ -33,11 +32,32 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Result<App> {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-        let running_flag = Arc::new(AtomicBool::new(true));
-        let (tx, rx) = mpsc::channel();
-        let (block_tx, block_rx) = mpsc::channel();
-        let bpf_worker = BPFWorker::new(config.target_pid, tx, block_rx, running_flag.clone());
-        let mut app_context = ApplicationContext::new(&config, rx, block_tx, running_flag.clone())?;
+        let running_flag = config.running_flag.clone();
+        let bpf_worker_running_flag = config.running_flag.clone();
+        let bpf_worker_bpf_program = config.bpf_program.clone();
+
+        let bpf_worker = std::thread::spawn(move || -> Result<()> {
+            let ringbuffer_res = bpf_worker_bpf_program.build_ringbuffer();
+            match ringbuffer_res {
+                Ok(ringbuffer) => {
+                    while bpf_worker_running_flag.load(Ordering::Relaxed) {
+                        match ringbuffer.poll(Duration::from_millis(200)) {
+                            Ok(_) => {},
+                            Err(err) => {
+                                tracing::error!("[BPF Polling Thread]: {:?}", err);
+                                bpf_worker_running_flag.store(false, Ordering::Relaxed);
+                            },
+                        }
+                    }
+                },
+                Err(err) => {
+                    tracing::error!("[BPF Polling Thread]: {:?}", err);
+                    bpf_worker_running_flag.store(false, Ordering::Relaxed);
+                }
+            }
+            Ok(())
+        });
+        let mut app_context = ApplicationContext::new(config)?;
 
         let current_event_sort_field = SortEventField::Timestamp;
         let current_metric_sort_field = SortMetricField::Count;
@@ -48,8 +68,7 @@ impl App {
         app_context.set_metric_sort_field(current_metric_sort_field);
         Ok(App {
             app_context,
-            _bpf_worker: bpf_worker,
-            _config: config,
+            bpf_worker: Some(bpf_worker),
             running_flag,
             current_event_sort_field,
             current_event_sort_order,
@@ -233,13 +252,13 @@ impl App {
                             ui.monospace(&metric.events_count);
                         });
                         row.col(|ui| {
-                            if self.app_context.is_blocked(&metric.ip_addr) {
+                            if self.app_context.is_in_profile(&metric.ip_addr) {
                                 if ui.button("Unblock").clicked() {
-                                    self.app_context.unblock(metric.ip_addr);
+                                    self.app_context.add_to_profile(metric.ip_addr);
                                 }
                             } else {
                                 if ui.button("Block").clicked() {
-                                    self.app_context.block(metric.ip_addr);
+                                    self.app_context.remove_from_profile(metric.ip_addr);
                                 }
                             }
                         });
@@ -252,6 +271,9 @@ impl App {
 impl eframe::App for App {
     fn on_exit(&mut self) {
         self.running_flag.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.bpf_worker.take() {
+            let _ = handle.join();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -284,11 +306,12 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let app_config = Config {
-        max_events_log_size: 100000,
-        max_events_block_size: 1000,
-        target_pid: args.target_pid,
-    };
+    let app_config = ConfigBuilder::new()
+        .base_profile(netlogger_rs::bpf::BaseProfile::DenyAll)
+        .max_events_block_size(1000)
+        .max_events_log_size(100000)
+        .target_pid(args.target_pid)
+        .build()?;
 
     eframe::run_native(
         "netlogger-rs",
