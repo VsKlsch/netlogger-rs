@@ -65,4 +65,10 @@ impl Metrics {
     pub fn get_unique_ip_count(&self) -> usize {
         self.ip_events_metric.len()
     }
+
+    pub fn register_zero_event_ip(&mut self, addr: IpAddr) {
+        self.ip_events_metric.insert(addr, 0);
+        self.ip_string_storage
+            .insert(addr, Arc::from(addr.to_string()));
+    }
 }

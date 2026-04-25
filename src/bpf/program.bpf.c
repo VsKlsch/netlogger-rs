@@ -9,6 +9,7 @@
 #ifndef AF_INET
     #define AF_INET 2
     #define AF_INET6 10
+    #define AF_UNIX 16
 #endif
 
 #ifndef EPERM
@@ -111,7 +112,7 @@ static __always_inline int parse_sockaddr(__u64 uservaddr, struct event *e){
         if(bpf_probe_read_user(&e->port, sizeof(e->port), (void*)(uservaddr+offsetof(struct sockaddr_in, sin_port)))){
             return PARSE_STATUS_ERROR_AT_READ_SOCKADDR;
         }
-        
+        e->port = bpf_ntohs(e->port);
         if(bpf_probe_read_user(&e->ip[12], 4, (void*)(uservaddr+offsetof(struct sockaddr_in, sin_addr)))){
             return PARSE_STATUS_ERROR_AT_READ_SOCKADDR;
         }
@@ -123,6 +124,7 @@ static __always_inline int parse_sockaddr(__u64 uservaddr, struct event *e){
         if(bpf_probe_read_user(&e->port, sizeof(e->port), (void*)(uservaddr+offsetof(struct sockaddr_in6, sin6_port)))){
             return PARSE_STATUS_ERROR_AT_READ_SOCKADDR;
         }
+        e->port = bpf_ntohs(e->port);
         if(bpf_probe_read_user(e->ip, 16, (void*)(uservaddr+offsetof(struct sockaddr_in6, sin6_addr)))){
             return PARSE_STATUS_ERROR_AT_READ_SOCKADDR;
         }
@@ -192,7 +194,7 @@ static __always_inline void fill_event_struct(struct event *e, __u64 pid_tgid, _
     e->parse_status = PARSE_STATUS_PARTIAL;
 }
 
-static __always_inline void first_stage(__u64 uservaddr, __u8 l3_protocol){
+static __always_inline void first_stage(__u64 uservaddr, __u8 l3_protocol, __u8 call_from){
     if(uservaddr == 0){
         return;
     }
@@ -237,13 +239,13 @@ static __always_inline void third_stage(int verdict) {
 
 SEC("tracepoint/syscalls/sys_enter_connect")
 int trace_connect_enter(struct trace_event_raw_sys_enter *ctx){
-    first_stage(ctx->args[1], L4_PROTOCOL_TCP);
+    first_stage(ctx->args[1], L4_PROTOCOL_TCP, 0);
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_enter_sendto")
 int trace_sendto_enter(struct trace_event_raw_sys_enter *ctx){
-    first_stage(ctx->args[4], L4_PROTOCOL_UDP);
+    first_stage(ctx->args[4], L4_PROTOCOL_UDP, 1);
     return 0;
 }
 
@@ -253,7 +255,7 @@ int trace_sendmsg_enter(struct trace_event_raw_sys_enter *ctx){
     if(bpf_probe_read_user(&msg, sizeof(msg), (void*)ctx->args[1])){
         return 0;
     }
-    first_stage((__u64)msg.msg_name, L4_PROTOCOL_UDP);
+    first_stage((__u64)msg.msg_name, L4_PROTOCOL_UDP, 2);
     return 0;
 }
 

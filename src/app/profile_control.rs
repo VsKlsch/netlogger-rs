@@ -15,27 +15,38 @@ use anyhow::Result;
 pub struct ProfileControl {
     ip_map: HashMap<IpAddr, bool>,
     bpf_program: Arc<BPFProgram>,
-    current_profile: BaseProfile
+    current_profile: BaseProfile,
 }
 
 impl ProfileControl {
     pub fn new(bpf_program: Arc<BPFProgram>, current_profile: BaseProfile) -> Self {
-        Self { ip_map: HashMap::new(), bpf_program, current_profile }
-    }
-
-    pub fn add(&mut self, ip: IpAddr) {
-        if let Err(err) = self.bpf_program.send_list_event(IpListEvent::AddToList(ip)) {
-            tracing::error!("Error when send Block event for ip {} : {:?}", ip, err);
-        } else {
-            self.ip_map.insert(ip, true);
+        Self {
+            ip_map: HashMap::new(),
+            bpf_program,
+            current_profile,
         }
     }
 
-    pub fn remove(&mut self, ip: IpAddr) {
-        if let Err(err) = self.bpf_program.send_list_event(IpListEvent::RemoveFromList(ip)) {
+    pub fn add(&mut self, ip: IpAddr) -> Result<()> {
+        if let Err(err) = self.bpf_program.send_list_event(IpListEvent::AddToList(ip)) {
+            tracing::error!("Error when send Block event for ip {} : {:?}", ip, err);
+            Err(err)
+        } else {
+            self.ip_map.insert(ip, true);
+            Ok(())
+        }
+    }
+
+    pub fn remove(&mut self, ip: IpAddr) -> Result<()> {
+        if let Err(err) = self
+            .bpf_program
+            .send_list_event(IpListEvent::RemoveFromList(ip))
+        {
             tracing::error!("Error when send Unblock event for ip {} : {:?}", ip, err);
+            Err(err)
         } else {
             self.ip_map.insert(ip, false);
+            Ok(())
         }
     }
 
@@ -46,7 +57,14 @@ impl ProfileControl {
         }
     }
 
-    #[allow(dead_code)]
+    pub fn dump_profile_addrs(&self) -> Vec<IpAddr> {
+        self.ip_map
+            .iter()
+            .filter(|entry| *entry.1)
+            .map(|entry| entry.0.clone())
+            .collect()
+    }
+
     pub fn get_current_base_profile(&self) -> BaseProfile {
         self.current_profile
     }
@@ -59,5 +77,4 @@ impl ProfileControl {
         }
         res
     }
-
 }

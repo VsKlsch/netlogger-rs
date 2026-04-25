@@ -1,5 +1,6 @@
 use netlogger_rs::app::{ApplicationContext, SortOrder};
 use netlogger_rs::config::ConfigBuilder;
+use netlogger_rs::profile::JsonProfileConverter;
 
 use std::{
     sync::{
@@ -29,13 +30,15 @@ fn main() -> Result<()> {
         ctrlc_flag_clone.store(false, Ordering::Relaxed);
     })?;
 
+    let covnerter = JsonProfileConverter::default();
+
     let app_config = ConfigBuilder::new()
-        .base_profile(netlogger_rs::bpf::BaseProfile::DenyAll)
+        .base_profile(netlogger_rs::bpf::BaseProfile::PassAll)
         .max_events_block_size(0)
         .max_events_log_size(0)
         .target_pid(args.target_pid)
         .build()?;
-    let mut app_contex = ApplicationContext::new(app_config)?;
+    let mut app_contex = ApplicationContext::<JsonProfileConverter>::new(covnerter, app_config)?;
 
     while running_flag.load(Ordering::Relaxed) {
         app_contex

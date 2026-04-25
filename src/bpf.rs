@@ -17,9 +17,10 @@ use std::pin::Pin;
 use std::sync::mpsc;
 
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags, OpenObject, RingBuffer, RingBufferBuilder, Link};
+use libbpf_rs::{Link, MapCore, MapFlags, OpenObject, RingBuffer, RingBufferBuilder};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 #[path = "bpf/program_skel.rs"]
 #[allow(warnings)]
@@ -38,7 +39,7 @@ const PROFILE_MODE_KEY: [u8; 4] = [0u8; 4];
 const IP_LIST_VALUE: [u8; 1] = [1u8];
 
 /// Network address family of a connection event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressFamily {
     /// IPv4 Address family
     Inet,
@@ -46,6 +47,7 @@ pub enum AddressFamily {
     /// IPv6 Address family
     Inet6,
 
+    Unix,
     /// Unknown or unsupported family
     Other(u16),
 }
@@ -56,6 +58,7 @@ impl Display for AddressFamily {
             AddressFamily::Inet => write!(f, "AF_INET"),
             AddressFamily::Inet6 => write!(f, "AF_INET6"),
             AddressFamily::Other(_) => write!(f, "UNKNOWN"),
+            AddressFamily::Unix => write!(f, "AF_UNIX"),
         }
     }
 }
@@ -65,16 +68,17 @@ impl From<u16> for AddressFamily {
         match v {
             2 => Self::Inet,
             10 => Self::Inet6,
+            16 => Self::Unix,
             v => Self::Other(v),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum L4Protocol{
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum L4Protocol {
     Tcp,
     Udp,
-    Other(u8)
+    Other(u8),
 }
 
 impl Display for L4Protocol {
@@ -82,7 +86,7 @@ impl Display for L4Protocol {
         match self {
             Self::Tcp => write!(f, "TCP"),
             Self::Udp => write!(f, "UDP"),
-            Self::Other(num) => write!(f, "Other({})", num)
+            Self::Other(num) => write!(f, "Other({})", num),
         }
     }
 }
@@ -95,15 +99,15 @@ impl From<u8> for L4Protocol {
             v => Self::Other(v),
         }
     }
-} 
+}
 
 #[derive(Debug, Clone)]
-pub enum ParseStatus{
+pub enum ParseStatus {
     Success,
     ErrorAtReadFamily,
     ErrorAtReadSockaddr,
     Partial,
-    Other(u8)
+    Other(u8),
 }
 
 impl Display for ParseStatus {
@@ -113,7 +117,7 @@ impl Display for ParseStatus {
             Self::ErrorAtReadFamily => write!(f, "Error at read family"),
             Self::ErrorAtReadSockaddr => write!(f, "Error ad read Sockaddr"),
             Self::Partial => write!(f, "Partial"),
-            Self::Other(num) => write!(f, "Other({})", num)
+            Self::Other(num) => write!(f, "Other({})", num),
         }
     }
 }
@@ -125,17 +129,17 @@ impl From<u8> for ParseStatus {
             1 => Self::ErrorAtReadFamily,
             2 => Self::ErrorAtReadSockaddr,
             3 => Self::Partial,
-            v => Self::Other(v)
+            v => Self::Other(v),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum EventStatus{
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventStatus {
     Unknown,
     Block,
     Pass,
-    Other(u8)
+    Other(u8),
 }
 
 impl Display for EventStatus {
@@ -144,7 +148,7 @@ impl Display for EventStatus {
             Self::Unknown => write!(f, "Unknown"),
             Self::Block => write!(f, "Block"),
             Self::Pass => write!(f, "Pass"),
-            Self::Other(num) => write!(f, "Other({})", num)
+            Self::Other(num) => write!(f, "Other({})", num),
         }
     }
 }
@@ -155,16 +159,17 @@ impl From<u8> for EventStatus {
             0 => Self::Block,
             1 => Self::Pass,
             2 => Self::Unknown,
-            v => Self::Other(v)
+            v => Self::Other(v),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum BaseProfile{
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BaseProfile {
     DenyAll,
     PassAll,
-    Other(u8)
+    Other(u8),
 }
 
 impl Display for BaseProfile {
@@ -172,7 +177,7 @@ impl Display for BaseProfile {
         match self {
             Self::DenyAll => write!(f, "Deny All"),
             Self::PassAll => write!(f, "Pass All"),
-            Self::Other(num) => write!(f, "Other({})", num)
+            Self::Other(num) => write!(f, "Other({})", num),
         }
     }
 }
@@ -182,8 +187,14 @@ impl From<u8> for BaseProfile {
         match v {
             0 => Self::DenyAll,
             1 => Self::PassAll,
-            v => Self::Other(v)
+            v => Self::Other(v),
         }
+    }
+}
+
+impl Default for BaseProfile {
+    fn default() -> Self {
+        Self::DenyAll
     }
 }
 
@@ -231,7 +242,7 @@ pub struct Event {
     pub parse_status: ParseStatus,
 
     /// L4 type
-    pub l4_protocol: L4Protocol    
+    pub l4_protocol: L4Protocol,
 }
 
 impl Display for Event {
@@ -252,19 +263,21 @@ pub enum IpListEvent {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum BPFError{
-    RodataRetrievengError(&'static str)
+pub enum BPFError {
+    RodataRetrievengError(&'static str),
 }
 
 impl Display for BPFError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self{
-            BPFError::RodataRetrievengError(err) => write!(f, "Error when create BPFProgram: {}", err),
+        match *self {
+            BPFError::RodataRetrievengError(err) => {
+                write!(f, "Error when create BPFProgram: {}", err)
+            }
         }
     }
 }
 
-impl Error for BPFError{}
+impl Error for BPFError {}
 
 pub struct BPFProgram {
     _link_con4: Link,
@@ -273,10 +286,10 @@ pub struct BPFProgram {
     _link_sendmsg6: Link,
     skel: ProgramSkel<'static>,
     _open_object: Pin<Box<MaybeUninit<OpenObject>>>,
-    sender: mpsc::Sender<Event>
+    sender: mpsc::Sender<Event>,
 }
 
-impl BPFProgram{
+impl BPFProgram {
     fn parse_raw_event(raw_event: netlogger_ebpf::types::event) -> Event {
         let family = AddressFamily::from(raw_event.family);
         let ip = match &family {
@@ -291,7 +304,7 @@ impl BPFProgram{
                 }
             }
             AddressFamily::Inet6 => IpAddr::from(raw_event.ip),
-            AddressFamily::Other(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            AddressFamily::Other(_) | AddressFamily::Unix => IpAddr::V6(Ipv6Addr::UNSPECIFIED)
         };
         let event_status = EventStatus::from(raw_event.event_status);
         let parse_status = ParseStatus::from(raw_event.parse_status);
@@ -307,12 +320,15 @@ impl BPFProgram{
             timestamp: raw_event.timestamp,
             event_status,
             parse_status,
-            l4_protocol
+            l4_protocol,
         }
     }
 
-
-    pub fn new(target_pid: u32, base_profile: BaseProfile, trace_event_sender: mpsc::Sender<Event>) -> Result<BPFProgram> {
+    pub fn new(
+        target_pid: u32,
+        base_profile: BaseProfile,
+        trace_event_sender: mpsc::Sender<Event>,
+    ) -> Result<BPFProgram> {
         let mut program_skel_builder = ProgramSkelBuilder::default();
 
         #[cfg(debug_assertions)]
@@ -323,7 +339,8 @@ impl BPFProgram{
         let rodata = open_skel
             .maps
             .rodata_data
-            .as_deref_mut().ok_or(BPFError::RodataRetrievengError("Error retrieveng ROData"))?;
+            .as_deref_mut()
+            .ok_or(BPFError::RodataRetrievengError("Error retrieveng ROData"))?;
 
         rodata.fallback_profile = base_profile.into();
         rodata.initial_target_tgid = target_pid;
@@ -333,9 +350,13 @@ impl BPFProgram{
         // SAFETY: The `skel` object has an effective lifetime of `open_object`,
         // but we change it to `static` so that they can coexist in the same structure BPFProgram.
         // Rust's reference mechanism ensures that `skel` will be destroyed before `_open_object`.
-        let mut skel: ProgramSkel<'static> = unsafe{ std::mem::transmute(skel) };
-        let cp_value: [u8;1] = [base_profile.into()];
-        skel.maps.profile_mode.update(&PROFILE_MODE_KEY, &cp_value, libbpf_rs::MapFlags::empty())?;
+        let mut skel: ProgramSkel<'static> = unsafe { std::mem::transmute(skel) };
+        let cp_value: [u8; 1] = [base_profile.into()];
+        skel.maps.profile_mode.update(
+            &PROFILE_MODE_KEY,
+            &cp_value,
+            libbpf_rs::MapFlags::empty(),
+        )?;
 
         skel.attach()?;
 
@@ -362,15 +383,15 @@ impl BPFProgram{
             .progs
             .sendmsg6_filter
             .attach_cgroup(cgroup.as_raw_fd())?;
-        
-        Ok(BPFProgram{
+
+        Ok(BPFProgram {
             _link_con4: link_con4,
             _link_con6: link_con6,
             _link_sendmsg4: link_sendmsg4,
             _link_sendmsg6: link_sendmsg6,
             _open_object: open_object,
             skel,
-            sender: trace_event_sender
+            sender: trace_event_sender,
         })
     }
 
@@ -390,15 +411,18 @@ impl BPFProgram{
     }
 
     pub fn send_list_event(&self, event: IpListEvent) -> Result<()> {
-        match event{
+        match event {
             IpListEvent::AddToList(ip_addr) => {
                 let raw_ip = Self::ip_to_bytes(ip_addr);
-                self.skel.maps.ip_list.update(&raw_ip, &IP_LIST_VALUE, MapFlags::empty())?;
-            },
+                self.skel
+                    .maps
+                    .ip_list
+                    .update(&raw_ip, &IP_LIST_VALUE, MapFlags::empty())?;
+            }
             IpListEvent::RemoveFromList(ip_addr) => {
                 let raw_ip = Self::ip_to_bytes(ip_addr);
                 self.skel.maps.ip_list.delete(&raw_ip)?;
-            },
+            }
         }
         Ok(())
     }
@@ -406,22 +430,28 @@ impl BPFProgram{
     pub fn set_current_profile(&self, profile: BaseProfile) -> Result<()> {
         let raw_profile: u8 = profile.into();
 
-        self.skel.maps.profile_mode.update(&PROFILE_MODE_KEY, std::slice::from_ref(&raw_profile), MapFlags::empty())?;
+        self.skel.maps.profile_mode.update(
+            &PROFILE_MODE_KEY,
+            std::slice::from_ref(&raw_profile),
+            MapFlags::empty(),
+        )?;
 
-        Ok(()) 
+        Ok(())
     }
 
     pub fn get_current_profile(&self) -> Result<Option<BaseProfile>> {
-        let raw_profile_option = self.skel.maps.profile_mode.lookup(&PROFILE_MODE_KEY, MapFlags::empty())?;
-        Ok(
-            match raw_profile_option {
-                Some(vec) => Some(BaseProfile::from(vec[0])),
-                None => None
-            }
-        )
+        let raw_profile_option = self
+            .skel
+            .maps
+            .profile_mode
+            .lookup(&PROFILE_MODE_KEY, MapFlags::empty())?;
+        Ok(match raw_profile_option {
+            Some(vec) => Some(BaseProfile::from(vec[0])),
+            None => None,
+        })
     }
 
-    pub fn build_ringbuffer(&self) -> Result<RingBuffer<'_>>{
+    pub fn build_ringbuffer(&self) -> Result<RingBuffer<'_>> {
         let mut ringbuffer_builder = RingBufferBuilder::new();
         let trace_event_sender = self.sender.clone();
         ringbuffer_builder.add(&self.skel.maps.events, move |data: &[u8]| {

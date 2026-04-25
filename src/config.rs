@@ -3,10 +3,10 @@
 //! This module provides:
 //! - [`Config`] — all external configuration parameters
 
-use std::sync::{mpsc, Arc};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 
-use crate::bpf::{Event, BPFProgram, BaseProfile};
+use crate::bpf::{BPFProgram, BaseProfile, Event};
 
 use anyhow::Result;
 
@@ -23,14 +23,16 @@ pub struct Config {
     pub base_profile: BaseProfile,
     pub event_rx: mpsc::Receiver<Event>,
     pub running_flag: Arc<AtomicBool>,
-    pub bpf_program: Arc<BPFProgram>
+    pub bpf_program: Arc<BPFProgram>,
+    pub profile_path: Option<String>,
 }
 
 pub struct ConfigBuilder {
     base_profile_value: BaseProfile,
     max_events_block_size_value: usize,
     max_events_log_size_value: usize,
-    target_pid_value: u32 
+    target_pid_value: u32,
+    profile_path_value: Option<String>,
 }
 
 impl ConfigBuilder {
@@ -39,7 +41,8 @@ impl ConfigBuilder {
             base_profile_value: BaseProfile::DenyAll,
             max_events_block_size_value: 0,
             max_events_log_size_value: 0,
-            target_pid_value: 0
+            target_pid_value: 0,
+            profile_path_value: None,
         }
     }
 
@@ -58,31 +61,34 @@ impl ConfigBuilder {
         self
     }
 
-    pub fn base_profile(mut self, value: BaseProfile) -> Self{
+    pub fn base_profile(mut self, value: BaseProfile) -> Self {
         self.base_profile_value = value;
+        self
+    }
+
+    pub fn profile_path(mut self, profile: String) -> Self {
+        self.profile_path_value = Some(profile);
         self
     }
 
     pub fn build(self) -> Result<Config> {
         let running_flag = Arc::new(AtomicBool::new(true));
         let (event_tx, event_rx) = mpsc::channel::<Event>();
-        let bpf_program = Arc::new(
-            BPFProgram::new(
-                self.target_pid_value, 
-                self.base_profile_value,
-                event_tx
-            )?
-        );
+        let bpf_program = Arc::new(BPFProgram::new(
+            self.target_pid_value,
+            self.base_profile_value,
+            event_tx,
+        )?);
         tracing::info!("[Config] Successfully built");
-        Ok(Config{
+        Ok(Config {
             max_events_block_size: self.max_events_block_size_value,
             max_events_log_size: self.max_events_log_size_value,
             target_pid: self.target_pid_value,
             event_rx,
             running_flag,
             bpf_program,
-            base_profile: self.base_profile_value
+            base_profile: self.base_profile_value,
+            profile_path: self.profile_path_value,
         })
     }
 }
-

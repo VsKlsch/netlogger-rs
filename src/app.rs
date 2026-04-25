@@ -9,9 +9,9 @@
 //! - [`SortMetricField`] — sort field selector for metrics
 //! - [`SortOrder`] — sort order (ascending or descending)
 
-mod profile_control;
 mod event;
 mod metric;
+mod profile_control;
 mod sort_types;
 
 use std::collections::VecDeque;
@@ -19,10 +19,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::app::metric::Metrics;
+use crate::bpf::BaseProfile;
 use crate::config::Config;
+use crate::profile::{ActualProfile, Profile, ProfileConverter};
 
-use profile_control::ProfileControl;
 use event::EventBridge;
+use profile_control::ProfileControl;
 
 pub use event::display_event::DisplayEvent;
 pub use event::event_view::EventView;
@@ -36,7 +38,7 @@ use anyhow::Result;
 /// Manages event collection, address metrics, and IP blocking.
 /// Acts as a facade over the BPF communication layer, event storage,
 /// and blocking control.
-pub struct ApplicationContext {
+pub struct ApplicationContext<Converter: ProfileConverter> {
     // Configuration
     max_events_log_size: usize,
     start_time: Option<u64>,
@@ -52,9 +54,11 @@ pub struct ApplicationContext {
     // Fields for generated views
     sort_event_field: SortEventField,
     sort_metric_field: SortMetricField,
+
+    converter: Converter,
 }
 
-impl ApplicationContext {
+impl<C: ProfileConverter> ApplicationContext<C> {
     /// Creates a new `ApplicationContext`.
     ///
     /// Initializes inner components including [`EventBridge`] and [`BlockControl`].
@@ -67,9 +71,7 @@ impl ApplicationContext {
     ///
     /// # Errors
     /// Returns `Err` if any inner component fails to initialize.
-    pub fn new(
-        config: Config,
-    ) -> Result<ApplicationContext> {
+    pub fn new(converter: C, config: Config) -> Result<ApplicationContext<C>> {
         let max_events_log_size = config.max_events_log_size;
         let mut max_events_block_size = config.max_events_block_size;
 
@@ -88,10 +90,33 @@ impl ApplicationContext {
         }
 
         let event_bridge = EventBridge::new(
-            max_events_block_size, 
-            config.event_rx, 
-            config.running_flag.clone()
+            max_events_block_size,
+            config.event_rx,
+            config.running_flag.clone(),
         )?;
+
+        let mut metrics = Metrics::new();
+        let mut profile_control =
+            ProfileControl::new(config.bpf_program.clone(), config.base_profile);
+
+        if let Some(profile_path) = config.profile_path {
+            let raw_profile = std::fs::read_to_string(profile_path)?;
+            let profile = converter.deserialize(&raw_profile)?;
+
+            profile
+                .ip_list
+                .into_iter()
+                .for_each(|ip| match profile_control.add(ip) {
+                    Ok(_) => {
+                        metrics.register_zero_event_ip(ip);
+                    }
+                    Err(_) => {}
+                });
+
+            if profile.base_profile != profile_control.get_current_base_profile() {
+                profile_control.set_current_base_profile(profile.base_profile)?;
+            }
+        }
 
         tracing::info!("Application context is created");
 
@@ -100,13 +125,11 @@ impl ApplicationContext {
             events: VecDeque::new(),
             sort_event_field: SortEventField::Timestamp,
             max_events_log_size,
-            metrics: Metrics::new(),
+            metrics,
             start_time: None,
             sort_metric_field: SortMetricField::Ip,
-            profile_control: ProfileControl::new(
-                config.bpf_program.clone(), 
-                config.base_profile
-            ),
+            profile_control,
+            converter,
         })
     }
 
@@ -155,9 +178,9 @@ impl ApplicationContext {
                 let timestamp_diff_secs: f64 = (display_event.raw_event.timestamp
                     - self.start_time.unwrap_or(display_event.raw_event.timestamp))
                     as f64
-                    / 1_000_000.0;
+                    / 1_000_000_000.0;
 
-                display_event.timestamp = std::format!("{:.3} ms", timestamp_diff_secs);
+                display_event.timestamp = std::format!("{:.3} s", timestamp_diff_secs);
                 self.events.push_back(display_event);
             }
         }
@@ -181,7 +204,7 @@ impl ApplicationContext {
     }
 
     pub fn add_to_profile(&mut self, ip: IpAddr) {
-        self.profile_control.add(ip);
+        let _ = self.profile_control.add(ip);
     }
 
     /// Sends a block command for the given IP address to the BPF layer.
@@ -189,7 +212,7 @@ impl ApplicationContext {
     /// # Arguments
     /// * `ip` — IP address to block
     pub fn remove_from_profile(&mut self, ip: IpAddr) {
-        self.profile_control.remove(ip);
+        let _ = self.profile_control.remove(ip);
     }
 
     /// Sends a unblock command for the given IP address to the BPF layer.
@@ -198,5 +221,42 @@ impl ApplicationContext {
     /// * `ip` — IP address to unblock
     pub fn is_in_profile(&self, ip: &IpAddr) -> bool {
         self.profile_control.contains(ip)
+    }
+
+    fn collect_profile_from_metrics(&self) -> Profile {
+        let mut profile = ActualProfile::default();
+        profile.base_profile = self.profile_control.get_current_base_profile();
+        profile.ip_list = self.profile_control.dump_profile_addrs();
+        Profile::from(profile)
+    }
+
+    pub fn export_profile(&self) {
+        let profile = self.collect_profile_from_metrics();
+        match self.converter.serialize(&profile) {
+            Ok(profile_str) => {
+                std::thread::spawn(move || {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name(C::DEFAULT_PROFILE_NAME)
+                        .add_filter(C::DEFAULT_PROFILE_NAME, C::PROFILE_EXTENSIONS)
+                        .save_file()
+                    {
+                        if let Err(err) = std::fs::write(path, profile_str) {
+                            tracing::error!("[ProfileWriterWorker] Error: {:?}", err);
+                        }
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::error!("[AppContext] Error: {:?}", err);
+            }
+        }
+    }
+
+    pub fn get_current_base_profile(&self) -> BaseProfile {
+        self.profile_control.get_current_base_profile()
+    }
+
+    pub fn set_current_base_profile(&mut self, profile: BaseProfile) {
+        let _ = self.profile_control.set_current_base_profile(profile);
     }
 }

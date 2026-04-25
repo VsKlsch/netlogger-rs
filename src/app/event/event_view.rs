@@ -48,6 +48,7 @@ impl<'a> EventView<'a> {
                 SortEventField::Tgid => a.raw_event.tgid.cmp(&b.raw_event.tgid),
                 SortEventField::Port => a.raw_event.port.cmp(&b.raw_event.port),
                 SortEventField::Timestamp => a.raw_event.timestamp.cmp(&b.raw_event.timestamp),
+                SortEventField::L4Protocol => a.raw_event.l4_protocol.cmp(&b.raw_event.l4_protocol),
             };
             match order {
                 SortOrder::Ascending => ord,

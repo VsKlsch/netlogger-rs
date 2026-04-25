@@ -18,6 +18,7 @@ pub enum SortEventField {
     Port,
     /// Sort by timestamp.
     Timestamp,
+    L4Protocol,
 }
 
 /// Sort field selector for metrics table.
