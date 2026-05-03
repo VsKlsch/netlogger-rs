@@ -1,10 +1,18 @@
-//! Userspace of BPF Layer of netlogger-rs
+//! Userspace layer for the netlogger-rs eBPF program.
+//!
+//! Handles BPF program loading, cgroup attachment, map operations,
+//! ring buffer polling, and raw event parsing into typed Rust structures.
 //!
 //! This module provides:
-//! - [`AddressFamily`] - public enum for event's request net family
-//! - [`Event`] - structure contains information about connection event
-//! - [`BlockEvent`] - structure contains information about block event
-//! - [`BPFWorker`] - main structure for BPF layer
+//! - [`AddressFamily`] — network address family of a connection event
+//! - [`L4Protocol`] — transport-layer protocol (TCP/UDP)
+//! - [`ParseStatus`] — outcome of address parsing from the BPF context
+//! - [`EventStatus`] — whether the connection was blocked or passed
+//! - [`BaseProfile`] — deny-all or pass-all base filtering mode
+//! - [`Event`] — parsed network connection event
+//! - [`IpListEvent`] — command to add or remove an IP from the BPF list
+//! - [`BPFProgram`] — loaded and attached eBPF program instance
+//! - [`BPFError`] — BPF initialisation errors
 
 mod program_skel;
 
@@ -47,6 +55,7 @@ pub enum AddressFamily {
     /// IPv6 Address family
     Inet6,
 
+    /// Unix domain socket family
     Unix,
     /// Unknown or unsupported family
     Other(u16),
@@ -74,10 +83,14 @@ impl From<u16> for AddressFamily {
     }
 }
 
+/// Layer 4 (transport) protocol of a connection event.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum L4Protocol {
+    /// TCP protocol.
     Tcp,
+    /// UDP protocol.
     Udp,
+    /// Unknown or unsupported protocol (raw number).
     Other(u8),
 }
 
@@ -101,12 +114,17 @@ impl From<u8> for L4Protocol {
     }
 }
 
+/// Outcome of parsing the destination address from the BPF cgroup context.
+///
+/// Since addresses are read from kernel memory (not userspace),
+/// the only possible error is an unrecognized address family.
 #[derive(Debug, Clone)]
 pub enum ParseStatus {
+    /// Address was parsed successfully.
     Success,
-    ErrorAtReadFamily,
-    ErrorAtReadSockaddr,
-    Partial,
+    /// Address family was unrecognized (not AF_INET or AF_INET6).
+    ErrorUnknownFamily,
+    /// Unknown parse status code (reserved for forward compatibility).
     Other(u8),
 }
 
@@ -114,9 +132,7 @@ impl Display for ParseStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Success => write!(f, "Success"),
-            Self::ErrorAtReadFamily => write!(f, "Error at read family"),
-            Self::ErrorAtReadSockaddr => write!(f, "Error ad read Sockaddr"),
-            Self::Partial => write!(f, "Partial"),
+            Self::ErrorUnknownFamily => write!(f, "Error at unknown family"),
             Self::Other(num) => write!(f, "Other({})", num),
         }
     }
@@ -126,19 +142,22 @@ impl From<u8> for ParseStatus {
     fn from(v: u8) -> Self {
         match v {
             0 => Self::Success,
-            1 => Self::ErrorAtReadFamily,
-            2 => Self::ErrorAtReadSockaddr,
-            3 => Self::Partial,
+            1 => Self::ErrorUnknownFamily,
             v => Self::Other(v),
         }
     }
 }
 
+/// Whether a connection event was blocked or passed by the BPF filter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventStatus {
+    /// Status could not be determined.
     Unknown,
+    /// Connection was blocked.
     Block,
+    /// Connection was allowed to pass.
     Pass,
+    /// Unknown or unsupported status (raw code).
     Other(u8),
 }
 
@@ -164,11 +183,18 @@ impl From<u8> for EventStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+/// Base filtering profile applied by the BPF program.
+///
+/// Determines the default behaviour for connections not explicitly listed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BaseProfile {
+    /// Deny all connections by default; only explicitly listed IPs are allowed.
+    #[default]
     DenyAll,
+    /// Allow all connections by default; only explicitly listed IPs are blocked.
     PassAll,
+    /// Unknown or unsupported profile mode (raw code).
     Other(u8),
 }
 
@@ -192,15 +218,9 @@ impl From<u8> for BaseProfile {
     }
 }
 
-impl Default for BaseProfile {
-    fn default() -> Self {
-        Self::DenyAll
-    }
-}
-
-impl Into<u8> for BaseProfile {
-    fn into(self) -> u8 {
-        match self {
+impl From<BaseProfile> for u8 {
+    fn from(val: BaseProfile) -> Self {
+        match val {
             BaseProfile::DenyAll => 0u8,
             BaseProfile::PassAll => 1u8,
             BaseProfile::Other(v) => v,
@@ -208,10 +228,10 @@ impl Into<u8> for BaseProfile {
     }
 }
 
-/// Represents a network connection event captured from the BPF layer.
+/// Represents a network connection event captured from the BPF cgroup hooks.
 ///
-/// Contains process information and destination address details.
-/// Block/pass state is not included — planned for a future release.
+/// Contains process information, destination address, transport protocol,
+/// parsing outcome, and the block/pass decision applied by the BPF filter.
 #[derive(Debug, Clone)]
 pub struct Event {
     /// Destination IP address of the connection.
@@ -222,9 +242,6 @@ pub struct Event {
 
     /// Kernel thread group ID (TGID). Equivalent to userspace PID.
     pub tgid: u32,
-
-    /// Syscall identifier. Currently always 1, reserved for future use.
-    pub syscall_id: u32,
 
     /// Network address family.
     pub family: AddressFamily,
@@ -238,7 +255,7 @@ pub struct Event {
     /// Event status may be Block or Pass
     pub event_status: EventStatus,
 
-    /// Parse stauts Succes, Partial or error
+    /// Outcome of address parsing: success or unknown family error.
     pub parse_status: ParseStatus,
 
     /// L4 type
@@ -249,21 +266,26 @@ impl Display for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[{}] From: {}:{} [{}:{}] syscall: {} family: {}",
-            self.timestamp, self.ip, self.port, self.tgid, self.pid, self.syscall_id, self.family
+            "[{}] From: {}:{} [{}:{}] family: {}",
+            self.timestamp, self.ip, self.port, self.tgid, self.pid, self.family
         )
     }
 }
 
+/// Command sent to the BPF layer to add or remove an IP address.
 #[derive(Debug, Clone)]
 pub enum IpListEvent {
+    /// Add the given IP to the BPF IP list map.
     AddToList(IpAddr),
 
+    /// Remove the given IP from the BPF IP list map.
     RemoveFromList(IpAddr),
 }
 
+/// Errors that can occur during BPF program initialisation.
 #[derive(Debug, Clone, Copy)]
 pub enum BPFError {
+    /// Failed to retrieve the read-only data section from the BPF skeleton.
     RodataRetrievengError(&'static str),
 }
 
@@ -279,6 +301,10 @@ impl Display for BPFError {
 
 impl Error for BPFError {}
 
+/// Loaded and attached eBPF program controlling network connection filtering.
+///
+/// Holds the BPF skeleton, cgroup attachment links, and the event sender channel.
+/// Created via [`BPFProgram::new`].
 pub struct BPFProgram {
     _link_con4: Link,
     _link_con6: Link,
@@ -304,7 +330,7 @@ impl BPFProgram {
                 }
             }
             AddressFamily::Inet6 => IpAddr::from(raw_event.ip),
-            AddressFamily::Other(_) | AddressFamily::Unix => IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+            AddressFamily::Other(_) | AddressFamily::Unix => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
         };
         let event_status = EventStatus::from(raw_event.event_status);
         let parse_status = ParseStatus::from(raw_event.parse_status);
@@ -314,7 +340,6 @@ impl BPFProgram {
             ip,
             pid: raw_event.pid,
             tgid: raw_event.tgid,
-            syscall_id: raw_event.syscall_id,
             family,
             port: raw_event.port,
             timestamp: raw_event.timestamp,
@@ -324,6 +349,19 @@ impl BPFProgram {
         }
     }
 
+    /// Loads and attaches the eBPF program, configuring it for the given target PID and base profile.
+    ///
+    /// Attaches cgroup hooks for connect and sendmsg filtering,
+    /// plus sched_process_fork/exit tracepoints for process tree tracking.
+    ///
+    /// # Arguments
+    /// * `target_pid` — PID (TGID) of the root process whose connections to monitor
+    /// * `base_profile` — initial filtering profile (deny-all or pass-all)
+    /// * `trace_event_sender` — sender for connection events captured by the BPF probe
+    ///
+    /// # Errors
+    /// Returns an error if the BPF program fails to load, attach to cgroup hooks,
+    /// or attach to tracepoints.
     pub fn new(
         target_pid: u32,
         base_profile: BaseProfile,
@@ -360,7 +398,7 @@ impl BPFProgram {
 
         skel.attach()?;
 
-        tracing::info!("[BPF Program] Tracepoint successfully attached");
+        tracing::info!("[BPF Program] Cgroup hooks and tracepoints successfully attached");
 
         let cgroup = std::fs::File::open("/sys/fs/cgroup")?;
 
@@ -410,6 +448,13 @@ impl BPFProgram {
         raw_ip_addr
     }
 
+    /// Sends an add-to-list or remove-from-list command to the BPF IP list map.
+    ///
+    /// # Arguments
+    /// * `event` — [`IpListEvent`] specifying the IP address and operation
+    ///
+    /// # Errors
+    /// Returns an error if the BPF map update or delete operation fails.
     pub fn send_list_event(&self, event: IpListEvent) -> Result<()> {
         match event {
             IpListEvent::AddToList(ip_addr) => {
@@ -427,6 +472,13 @@ impl BPFProgram {
         Ok(())
     }
 
+    /// Updates the active base filtering profile in the BPF map.
+    ///
+    /// # Arguments
+    /// * `profile` — the new [`BaseProfile`] to apply
+    ///
+    /// # Errors
+    /// Returns an error if the BPF map update fails.
     pub fn set_current_profile(&self, profile: BaseProfile) -> Result<()> {
         let raw_profile: u8 = profile.into();
 
@@ -439,18 +491,29 @@ impl BPFProgram {
         Ok(())
     }
 
+    /// Reads the current base filtering profile from the BPF map.
+    ///
+    /// # Returns
+    /// `Some` with the current [`BaseProfile`], or `None` if the map key is absent.
+    ///
+    /// # Errors
+    /// Returns an error if the BPF map lookup fails.
     pub fn get_current_profile(&self) -> Result<Option<BaseProfile>> {
         let raw_profile_option = self
             .skel
             .maps
             .profile_mode
             .lookup(&PROFILE_MODE_KEY, MapFlags::empty())?;
-        Ok(match raw_profile_option {
-            Some(vec) => Some(BaseProfile::from(vec[0])),
-            None => None,
-        })
+        Ok(raw_profile_option.map(|vec| BaseProfile::from(vec[0])))
     }
 
+    /// Builds a ring buffer that polls the BPF events map and forwards parsed events.
+    ///
+    /// The returned [`RingBuffer`] must be polled in a loop (e.g. via [`RingBuffer::poll`])
+    /// to receive connection events from the BPF layer.
+    ///
+    /// # Errors
+    /// Returns an error if the ring buffer cannot be created from the BPF map.
     pub fn build_ringbuffer(&self) -> Result<RingBuffer<'_>> {
         let mut ringbuffer_builder = RingBufferBuilder::new();
         let trace_event_sender = self.sender.clone();

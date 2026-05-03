@@ -18,6 +18,7 @@ pub enum SortEventField {
     Port,
     /// Sort by timestamp.
     Timestamp,
+    /// Sort by L4 transport protocol.
     L4Protocol,
 }
 

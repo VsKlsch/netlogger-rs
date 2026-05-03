@@ -59,10 +59,12 @@ impl<'a> EventView<'a> {
         vec.into_iter()
     }
 
+    /// Returns the number of events in this view.
     pub fn len(&self) -> usize {
         self.events.iter().len()
     }
 
+    /// Returns `true` if there are no events in this view.
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }

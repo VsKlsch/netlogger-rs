@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::app::metric::Metrics;
 use crate::bpf::BaseProfile;
 use crate::config::Config;
-use crate::profile::{ActualProfile, Profile, ProfileConverter};
+use crate::profile::{Profile, ProfileConverter, ProfileV1};
 
 use event::EventBridge;
 use profile_control::ProfileControl;
@@ -103,15 +103,11 @@ impl<C: ProfileConverter> ApplicationContext<C> {
             let raw_profile = std::fs::read_to_string(profile_path)?;
             let profile = converter.deserialize(&raw_profile)?;
 
-            profile
-                .ip_list
-                .into_iter()
-                .for_each(|ip| match profile_control.add(ip) {
-                    Ok(_) => {
-                        metrics.register_zero_event_ip(ip);
-                    }
-                    Err(_) => {}
-                });
+            profile.ip_list.into_iter().for_each(|ip| {
+                if profile_control.add(ip).is_ok() {
+                    metrics.register_zero_event_ip(ip);
+                }
+            });
 
             if profile.base_profile != profile_control.get_current_base_profile() {
                 profile_control.set_current_base_profile(profile.base_profile)?;
@@ -133,18 +129,22 @@ impl<C: ProfileConverter> ApplicationContext<C> {
         })
     }
 
+    /// Returns the current sort field for the events table.
     pub fn get_event_sort_field(&self) -> SortEventField {
         self.sort_event_field
     }
 
+    /// Sets the sort field for the events table.
     pub fn set_event_sort_field(&mut self, sort_field: SortEventField) {
         self.sort_event_field = sort_field;
     }
 
+    /// Returns the current sort field for the metrics table.
     pub fn get_metric_sort_field(&self) -> SortMetricField {
         self.sort_metric_field
     }
 
+    /// Sets the sort field for the metrics table.
     pub fn set_metric_sort_field(&mut self, sort_field: SortMetricField) {
         self.sort_metric_field = sort_field;
     }
@@ -195,41 +195,48 @@ impl<C: ProfileConverter> ApplicationContext<C> {
         self.events.clear();
     }
 
+    /// Returns a reference to the address metrics store.
     pub fn get_metrics(&self) -> &Metrics {
         &self.metrics
     }
 
+    /// Returns the configured maximum number of events retained in the log.
     pub fn get_max_events_log_size(&self) -> usize {
         self.max_events_log_size
     }
 
+    /// Adds the given IP address to the block/allow list via the BPF layer.
     pub fn add_to_profile(&mut self, ip: IpAddr) {
         let _ = self.profile_control.add(ip);
     }
 
-    /// Sends a block command for the given IP address to the BPF layer.
+    /// Removes the given IP address from the block/allow list via the BPF layer.
     ///
     /// # Arguments
-    /// * `ip` — IP address to block
+    /// * `ip` — IP address to remove
     pub fn remove_from_profile(&mut self, ip: IpAddr) {
         let _ = self.profile_control.remove(ip);
     }
 
-    /// Sends a unblock command for the given IP address to the BPF layer.
+    /// Checks whether the given IP address is present in the block/allow list.
     ///
     /// # Arguments
-    /// * `ip` — IP address to unblock
+    /// * `ip` — IP address to check
     pub fn is_in_profile(&self, ip: &IpAddr) -> bool {
         self.profile_control.contains(ip)
     }
 
     fn collect_profile_from_metrics(&self) -> Profile {
-        let mut profile = ActualProfile::default();
-        profile.base_profile = self.profile_control.get_current_base_profile();
-        profile.ip_list = self.profile_control.dump_profile_addrs();
-        Profile::from(profile)
+        Profile::from(ProfileV1 {
+            base_profile: self.profile_control.get_current_base_profile(),
+            ip_list: self.profile_control.dump_profile_addrs(),
+        })
     }
 
+    /// Opens a file save dialog and exports the current profile to a file.
+    ///
+    /// Serialization is delegated to the configured [`ProfileConverter`].
+    /// The export runs on a separate thread to avoid blocking the UI.
     pub fn export_profile(&self) {
         let profile = self.collect_profile_from_metrics();
         match self.converter.serialize(&profile) {
@@ -239,10 +246,9 @@ impl<C: ProfileConverter> ApplicationContext<C> {
                         .set_file_name(C::DEFAULT_PROFILE_NAME)
                         .add_filter(C::DEFAULT_PROFILE_NAME, C::PROFILE_EXTENSIONS)
                         .save_file()
+                        && let Err(err) = std::fs::write(path, profile_str)
                     {
-                        if let Err(err) = std::fs::write(path, profile_str) {
-                            tracing::error!("[ProfileWriterWorker] Error: {:?}", err);
-                        }
+                        tracing::error!("[ProfileWriterWorker] Error: {:?}", err);
                     }
                 });
             }
@@ -252,10 +258,12 @@ impl<C: ProfileConverter> ApplicationContext<C> {
         }
     }
 
+    /// Returns the currently active base filtering profile.
     pub fn get_current_base_profile(&self) -> BaseProfile {
         self.profile_control.get_current_base_profile()
     }
 
+    /// Sets the base filtering profile (pass-all or deny-all).
     pub fn set_current_base_profile(&mut self, profile: BaseProfile) {
         let _ = self.profile_control.set_current_base_profile(profile);
     }

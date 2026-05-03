@@ -13,8 +13,10 @@ use std::{
 use anyhow::Result;
 use clap::Parser;
 
+/// Command-line arguments for netlogger-cli.
 #[derive(Parser)]
 struct Args {
+    /// PID (TGID) of the root process whose connections to monitor.
     #[arg(short, long)]
     target_pid: u32,
 }
@@ -30,9 +32,9 @@ fn main() -> Result<()> {
         ctrlc_flag_clone.store(false, Ordering::Relaxed);
     })?;
 
-    let covnerter = JsonProfileConverter::default();
+    let covnerter = JsonProfileConverter;
 
-    let app_config = ConfigBuilder::new()
+    let app_config = ConfigBuilder::default()
         .base_profile(netlogger_rs::bpf::BaseProfile::PassAll)
         .max_events_block_size(0)
         .max_events_log_size(0)

@@ -28,6 +28,7 @@ pub struct DisplayEvent {
     pub timestamp: String,
     /// Network address family as a formatted string.
     pub family: String,
+    /// Layer 4 transport protocol as a formatted string.
     pub l4_protocol: String,
 }
 
@@ -36,7 +37,7 @@ impl From<Arc<Event>> for DisplayEvent {
         // TODO: after 0.1.0 analyze AF_UNIX
         let ip_string = if e.family == AddressFamily::Unix {
             String::from("UNIX SOCKET")
-        }else{
+        } else {
             e.ip.to_string()
         };
         DisplayEvent {

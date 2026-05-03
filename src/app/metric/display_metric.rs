@@ -1,14 +1,14 @@
 //! Display representation of an address specific metric.
 //!
 //! This module provides [`DisplayMetric`] — a ready-to-render representation
-//! of a address specific emtric with pre-formatted string fields for UI display.
+//! of an address specific metric with pre-formatted string fields for UI display.
 
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-/// Ready-to-render representation of a address
-/// specific emtric with pre-formatted string fields for UI display.
+/// Ready-to-render representation of an address
+/// specific metric with pre-formatted string fields for UI display.
 ///
 /// Contains pre-formatted string fields for direct use in UI tables
 /// and raw ip for block button.

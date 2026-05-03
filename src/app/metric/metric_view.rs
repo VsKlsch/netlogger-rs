@@ -74,6 +74,7 @@ impl<'a> MetricView<'a> {
         })
     }
 
+    /// Returns the number of unique addresses in this metrics view.
     pub fn len(&self) -> usize {
         self.metrics.len()
     }

@@ -15,15 +15,22 @@ use clap::Parser;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
+/// Command-line arguments for netlogger-gui.
 #[derive(Parser)]
 struct Args {
+    /// PID (TGID) of the root process whose connections to monitor.
     #[arg(short, long)]
     target_pid: u32,
 
+    /// Optional path to a profile file to load at startup.
     #[arg(short, long, required = false)]
     profile_path: Option<String>,
 }
 
+/// Top-level application state for the netlogger GUI.
+///
+/// Owns the [`ApplicationContext`], BPF polling thread, sort state,
+/// and the running flag for graceful shutdown.
 struct App {
     app_context: ApplicationContext<JsonProfileConverter>,
     bpf_worker: Option<JoinHandle<Result<()>>>,
@@ -35,8 +42,13 @@ struct App {
 }
 
 impl App {
+    /// Initializes the application: creates the BPF worker thread, builds the
+    /// [`ApplicationContext`], and sets default sort state.
+    ///
+    /// # Errors
+    /// Returns an error if the application context fails to initialize.
     fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Result<App> {
-        let converter = JsonProfileConverter::default();
+        let converter = JsonProfileConverter;
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         let running_flag = config.running_flag.clone();
         let bpf_worker_running_flag = config.running_flag.clone();
@@ -83,6 +95,10 @@ impl App {
         })
     }
 
+    /// Renders a sortable column header button for the connections table.
+    ///
+    /// Clicking toggles sort order if this field is already active,
+    /// or switches to this field with ascending order otherwise.
     fn connections_panel_button(&mut self, ui: &mut egui::Ui, field: SortEventField) {
         let button_name: &str = match field {
             SortEventField::Ip => "Address",
@@ -108,6 +124,10 @@ impl App {
         }
     }
 
+    /// Renders a sortable column header button for the address statistics table.
+    ///
+    /// Clicking toggles sort order if this field is already active,
+    /// or switches to this field with ascending order otherwise.
     fn ip_metrics_panel_button(&mut self, ui: &mut egui::Ui, field: SortMetricField) {
         let button_name: &str = match field {
             SortMetricField::Ip => "Address",
@@ -130,6 +150,9 @@ impl App {
         }
     }
 
+    /// Renders the left panel: a sortable table of recent connection events.
+    ///
+    /// Blocked connections are highlighted with a red background.
     fn connections_panel(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, width: f32) {
         let max_events_log_size = self.app_context.get_max_events_log_size();
         // левая панель — список соединений
@@ -215,6 +238,8 @@ impl App {
             });
     }
 
+    /// Renders the bottom-right panel: base profile selector, summary statistics,
+    /// and the export profile button.
     fn summary_panel(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, height: f32) {
         let mut mode = self.app_context.get_current_base_profile();
         let metrics = self.app_context.get_metrics();
@@ -253,6 +278,8 @@ impl App {
         }
     }
 
+    /// Renders the top-right panel: a sortable address statistics table
+    /// with add/remove block list buttons per address.
     fn address_statisstics_panel(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // правая верхняя — статистика адресов
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -345,7 +372,7 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let mut app_config_builder = ConfigBuilder::new()
+    let mut app_config_builder = ConfigBuilder::default()
         .base_profile(netlogger_rs::bpf::BaseProfile::DenyAll)
         .max_events_block_size(1000)
         .max_events_log_size(100000)
