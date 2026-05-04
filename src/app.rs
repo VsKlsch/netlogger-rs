@@ -9,22 +9,22 @@
 //! - [`SortMetricField`] — sort field selector for metrics
 //! - [`SortOrder`] — sort order (ascending or descending)
 
-mod block_control;
 mod event;
 mod metric;
+mod profile_control;
 mod sort_types;
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::sync::mpsc;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 use crate::app::metric::Metrics;
-use crate::bpf::{BlockEvent, Event};
+use crate::bpf::BaseProfile;
 use crate::config::Config;
+use crate::profile::{Profile, ProfileConverter, ProfileV1};
 
-use block_control::BlockControl;
 use event::EventBridge;
+use profile_control::ProfileControl;
 
 pub use event::display_event::DisplayEvent;
 pub use event::event_view::EventView;
@@ -38,15 +38,14 @@ use anyhow::Result;
 /// Manages event collection, address metrics, and IP blocking.
 /// Acts as a facade over the BPF communication layer, event storage,
 /// and blocking control.
-#[derive(Debug)]
-pub struct ApplicationContext {
+pub struct ApplicationContext<Converter: ProfileConverter> {
     // Configuration
     max_events_log_size: usize,
     start_time: Option<u64>,
 
     // Components
     event_bridge: EventBridge,
-    block_control: BlockControl,
+    profile_control: ProfileControl,
 
     // Data
     events: VecDeque<DisplayEvent>,
@@ -55,9 +54,11 @@ pub struct ApplicationContext {
     // Fields for generated views
     sort_event_field: SortEventField,
     sort_metric_field: SortMetricField,
+
+    converter: Converter,
 }
 
-impl ApplicationContext {
+impl<C: ProfileConverter> ApplicationContext<C> {
     /// Creates a new `ApplicationContext`.
     ///
     /// Initializes inner components including [`EventBridge`] and [`BlockControl`].
@@ -70,12 +71,7 @@ impl ApplicationContext {
     ///
     /// # Errors
     /// Returns `Err` if any inner component fails to initialize.
-    pub fn new(
-        config: &Config,
-        event_rx: mpsc::Receiver<Event>,
-        block_event_sx: mpsc::Sender<BlockEvent>,
-        is_running: Arc<AtomicBool>,
-    ) -> Result<ApplicationContext> {
+    pub fn new(converter: C, config: Config) -> Result<ApplicationContext<C>> {
         let max_events_log_size = config.max_events_log_size;
         let mut max_events_block_size = config.max_events_block_size;
 
@@ -93,7 +89,30 @@ impl ApplicationContext {
             max_events_block_size = max_events_log_size;
         }
 
-        let event_bridge = EventBridge::new(max_events_block_size, event_rx, is_running.clone())?;
+        let event_bridge = EventBridge::new(
+            max_events_block_size,
+            config.event_rx,
+            config.running_flag.clone(),
+        )?;
+
+        let mut metrics = Metrics::new();
+        let mut profile_control =
+            ProfileControl::new(config.bpf_program.clone(), config.base_profile);
+
+        if let Some(profile_path) = config.profile_path {
+            let raw_profile = std::fs::read_to_string(profile_path)?;
+            let profile = converter.deserialize(&raw_profile)?;
+
+            profile.ip_list.into_iter().for_each(|ip| {
+                if profile_control.add(ip).is_ok() {
+                    metrics.register_zero_event_ip(ip);
+                }
+            });
+
+            if profile.base_profile != profile_control.get_current_base_profile() {
+                profile_control.set_current_base_profile(profile.base_profile)?;
+            }
+        }
 
         tracing::info!("Application context is created");
 
@@ -102,25 +121,30 @@ impl ApplicationContext {
             events: VecDeque::new(),
             sort_event_field: SortEventField::Timestamp,
             max_events_log_size,
-            metrics: Metrics::new(),
+            metrics,
             start_time: None,
             sort_metric_field: SortMetricField::Ip,
-            block_control: BlockControl::new(block_event_sx),
+            profile_control,
+            converter,
         })
     }
 
+    /// Returns the current sort field for the events table.
     pub fn get_event_sort_field(&self) -> SortEventField {
         self.sort_event_field
     }
 
+    /// Sets the sort field for the events table.
     pub fn set_event_sort_field(&mut self, sort_field: SortEventField) {
         self.sort_event_field = sort_field;
     }
 
+    /// Returns the current sort field for the metrics table.
     pub fn get_metric_sort_field(&self) -> SortMetricField {
         self.sort_metric_field
     }
 
+    /// Sets the sort field for the metrics table.
     pub fn set_metric_sort_field(&mut self, sort_field: SortMetricField) {
         self.sort_metric_field = sort_field;
     }
@@ -154,9 +178,9 @@ impl ApplicationContext {
                 let timestamp_diff_secs: f64 = (display_event.raw_event.timestamp
                     - self.start_time.unwrap_or(display_event.raw_event.timestamp))
                     as f64
-                    / 1_000_000.0;
+                    / 1_000_000_000.0;
 
-                display_event.timestamp = std::format!("{:.3} ms", timestamp_diff_secs);
+                display_event.timestamp = std::format!("{:.3} s", timestamp_diff_secs);
                 self.events.push_back(display_event);
             }
         }
@@ -171,31 +195,76 @@ impl ApplicationContext {
         self.events.clear();
     }
 
+    /// Returns a reference to the address metrics store.
     pub fn get_metrics(&self) -> &Metrics {
         &self.metrics
     }
 
+    /// Returns the configured maximum number of events retained in the log.
     pub fn get_max_events_log_size(&self) -> usize {
         self.max_events_log_size
     }
 
-    pub fn block(&mut self, ip: IpAddr) {
-        self.block_control.block(ip);
+    /// Adds the given IP address to the block/allow list via the BPF layer.
+    pub fn add_to_profile(&mut self, ip: IpAddr) {
+        let _ = self.profile_control.add(ip);
     }
 
-    /// Sends a block command for the given IP address to the BPF layer.
+    /// Removes the given IP address from the block/allow list via the BPF layer.
     ///
     /// # Arguments
-    /// * `ip` — IP address to block
-    pub fn unblock(&mut self, ip: IpAddr) {
-        self.block_control.unblock(ip);
+    /// * `ip` — IP address to remove
+    pub fn remove_from_profile(&mut self, ip: IpAddr) {
+        let _ = self.profile_control.remove(ip);
     }
 
-    /// Sends a unblock command for the given IP address to the BPF layer.
+    /// Checks whether the given IP address is present in the block/allow list.
     ///
     /// # Arguments
-    /// * `ip` — IP address to unblock
-    pub fn is_blocked(&self, ip: &IpAddr) -> bool {
-        self.block_control.is_blocked(ip)
+    /// * `ip` — IP address to check
+    pub fn is_in_profile(&self, ip: &IpAddr) -> bool {
+        self.profile_control.contains(ip)
+    }
+
+    fn collect_profile_from_metrics(&self) -> Profile {
+        Profile::from(ProfileV1 {
+            base_profile: self.profile_control.get_current_base_profile(),
+            ip_list: self.profile_control.dump_profile_addrs(),
+        })
+    }
+
+    /// Opens a file save dialog and exports the current profile to a file.
+    ///
+    /// Serialization is delegated to the configured [`ProfileConverter`].
+    /// The export runs on a separate thread to avoid blocking the UI.
+    pub fn export_profile(&self) {
+        let profile = self.collect_profile_from_metrics();
+        match self.converter.serialize(&profile) {
+            Ok(profile_str) => {
+                std::thread::spawn(move || {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name(C::DEFAULT_PROFILE_NAME)
+                        .add_filter(C::DEFAULT_PROFILE_NAME, C::PROFILE_EXTENSIONS)
+                        .save_file()
+                        && let Err(err) = std::fs::write(path, profile_str)
+                    {
+                        tracing::error!("[ProfileWriterWorker] Error: {:?}", err);
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::error!("[AppContext] Error: {:?}", err);
+            }
+        }
+    }
+
+    /// Returns the currently active base filtering profile.
+    pub fn get_current_base_profile(&self) -> BaseProfile {
+        self.profile_control.get_current_base_profile()
+    }
+
+    /// Sets the base filtering profile (pass-all or deny-all).
+    pub fn set_current_base_profile(&mut self, profile: BaseProfile) {
+        let _ = self.profile_control.set_current_base_profile(profile);
     }
 }

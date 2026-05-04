@@ -38,7 +38,7 @@ fn main() {
     Command::new("clang").arg("--version").output().expect(
         "clang not found. Install it: Fedora: dnf install clang | Ubuntu: apt install clang",
     );
-    
+
     // Generate vmlinux.h if not present
     if !vmlinux_path.exists() {
         // Check if bpftool exists

@@ -47,6 +47,7 @@ impl Metrics {
         self.total_events += 1;
     }
 
+    /// Returns the total number of connection events registered across all addresses.
     pub fn get_total_events(&self) -> usize {
         self.total_events
     }
@@ -62,7 +63,18 @@ impl Metrics {
         MetricView::new(&self.ip_events_metric, &self.ip_string_storage, field)
     }
 
+    /// Returns the number of unique destination IP addresses seen.
     pub fn get_unique_ip_count(&self) -> usize {
         self.ip_events_metric.len()
+    }
+
+    /// Registers an IP address with zero events in the metrics store.
+    ///
+    /// Used when loading a profile at startup so that profiled addresses
+    /// appear in the metrics table even before any events are captured.
+    pub fn register_zero_event_ip(&mut self, addr: IpAddr) {
+        self.ip_events_metric.insert(addr, 0);
+        self.ip_string_storage
+            .insert(addr, Arc::from(addr.to_string()));
     }
 }

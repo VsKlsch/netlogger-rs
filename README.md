@@ -7,9 +7,10 @@ Monitor and control network activity of a target process and its entire process 
 ## Features
 
 - **Process tree monitoring** — traces the target process and all its children spawned via `fork()`
-- **Real-time connection logging** — captures outgoing TCP connection attempts via eBPF tracepoints
-- **IP blocking** — blocks TCP connections to specific addresses using `cgroup/connect4` and `cgroup/connect6`
+- **Real-time connection logging** — captures outgoing TCP (`connect`) and UDP (`sendmsg`) connection attempts via eBPF cgroup hooks
+- **IP filtering with dual-mode profiles** — deny-all or pass-all base profile, combined with a per-address block/allow list; filtering applied at `cgroup/connect4/6` and `cgroup/sendmsg4/6`
 - **Address statistics** — tracks connection counts per destination address
+- **Profile export/import** — save and load IP list configurations as JSON
 - **CO-RE support** — compiled once, runs on any kernel 5.14+ with BTF enabled
 - **Low overhead** — eBPF programs run in kernel space without modifying kernel source
 
@@ -62,11 +63,11 @@ Replace `<PID>` with the PID of the process you want to monitor.
 
 ## Roadmap
 
-> ⚠️ **Current status: 0.0.3** — approaching first public release.
+> ⚠️ **Current status: 0.0.4** — documentation and code cleanup.
 
-- **0.0.3** — documentation, GitHub Actions CI, public release
-- **0.0.4** — extended blocking modes, address map export, UDP monitoring via `sendto`/`sendmsg` tracepoints
-- **0.1.0** — sandbox mode (launch target process through netlogger with a predefined blocking scheme), launch under a specific user identity while retaining root privileges for BPF, workspace crates refactoring
+- **0.0.3** — GitHub Actions CI, public release
+- **0.0.4** — consolidated cgroup-based filtering (TCP + UDP in cgroup hooks, removed sys_enter/sys_exit tracepoints), profiles import/export
+- **0.1.0** — sandbox mode (launch target process through netlogger with a predefined blocking scheme), launch under a specific user identity while retaining root privileges for BPF, workspace crates refactoring, additional protocol support
 
 ## License
 

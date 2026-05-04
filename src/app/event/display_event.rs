@@ -6,7 +6,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use crate::bpf::Event;
+use crate::bpf::{AddressFamily, Event};
 
 /// Ready-to-render representation of a network connection event.
 ///
@@ -28,17 +28,26 @@ pub struct DisplayEvent {
     pub timestamp: String,
     /// Network address family as a formatted string.
     pub family: String,
+    /// Layer 4 transport protocol as a formatted string.
+    pub l4_protocol: String,
 }
 
 impl From<Arc<Event>> for DisplayEvent {
     fn from(e: Arc<Event>) -> DisplayEvent {
+        // TODO: after 0.1.0 analyze AF_UNIX
+        let ip_string = if e.family == AddressFamily::Unix {
+            String::from("UNIX SOCKET")
+        } else {
+            e.ip.to_string()
+        };
         DisplayEvent {
-            ip: e.ip.to_string(),
+            ip: ip_string,
             pid: e.pid.to_string(),
             tgid: e.tgid.to_string(),
             port: e.port.to_string(),
             timestamp: e.timestamp.to_string(),
             family: e.family.to_string(),
+            l4_protocol: e.l4_protocol.to_string(),
             raw_event: e,
         }
     }
@@ -48,8 +57,8 @@ impl Display for DisplayEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[{}] From: {}:{} [{}:{}] family: {}",
-            self.timestamp, self.ip, self.port, self.tgid, self.pid, self.family
+            "[{}] {} From: {}:{} [{}:{}] family: {}",
+            self.timestamp, self.l4_protocol, self.ip, self.port, self.tgid, self.pid, self.family
         )
     }
 }

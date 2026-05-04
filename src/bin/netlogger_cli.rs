@@ -1,12 +1,11 @@
 use netlogger_rs::app::{ApplicationContext, SortOrder};
-use netlogger_rs::bpf;
-use netlogger_rs::config::Config;
+use netlogger_rs::config::ConfigBuilder;
+use netlogger_rs::profile::JsonProfileConverter;
 
 use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     time::Duration,
 };
@@ -14,10 +13,10 @@ use std::{
 use anyhow::Result;
 use clap::Parser;
 
-use bpf::{BPFWorker, BlockEvent, Event};
-
+/// Command-line arguments for netlogger-cli.
 #[derive(Parser)]
 struct Args {
+    /// PID (TGID) of the root process whose connections to monitor.
     #[arg(short, long)]
     target_pid: u32,
 }
@@ -33,15 +32,15 @@ fn main() -> Result<()> {
         ctrlc_flag_clone.store(false, Ordering::Relaxed);
     })?;
 
-    let (tx, rx) = mpsc::channel::<Event>();
-    let (block_tx, block_rx) = mpsc::channel::<BlockEvent>();
-    let config = Config {
-        max_events_block_size: 0,
-        max_events_log_size: 0,
-        target_pid: args.target_pid,
-    };
-    let _bpf_worker = BPFWorker::new(args.target_pid, tx, block_rx, running_flag.clone());
-    let mut app_contex = ApplicationContext::new(&config, rx, block_tx, running_flag.clone())?;
+    let covnerter = JsonProfileConverter;
+
+    let app_config = ConfigBuilder::default()
+        .base_profile(netlogger_rs::bpf::BaseProfile::PassAll)
+        .max_events_block_size(0)
+        .max_events_log_size(0)
+        .target_pid(args.target_pid)
+        .build()?;
+    let mut app_contex = ApplicationContext::<JsonProfileConverter>::new(covnerter, app_config)?;
 
     while running_flag.load(Ordering::Relaxed) {
         app_contex

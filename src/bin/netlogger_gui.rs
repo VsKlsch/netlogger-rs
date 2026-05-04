@@ -1,28 +1,39 @@
-use netlogger_rs::app::*;
-use netlogger_rs::bpf::BPFWorker;
+use netlogger_rs::bpf::{BaseProfile, EventStatus};
 use netlogger_rs::config::Config;
+use netlogger_rs::profile::JsonProfileConverter;
+use netlogger_rs::{app::*, config::ConfigBuilder};
 
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
+/// Command-line arguments for netlogger-gui.
 #[derive(Parser)]
 struct Args {
+    /// PID (TGID) of the root process whose connections to monitor.
     #[arg(short, long)]
     target_pid: u32,
+
+    /// Optional path to a profile file to load at startup.
+    #[arg(short, long, required = false)]
+    profile_path: Option<String>,
 }
 
+/// Top-level application state for the netlogger GUI.
+///
+/// Owns the [`ApplicationContext`], BPF polling thread, sort state,
+/// and the running flag for graceful shutdown.
 struct App {
-    app_context: ApplicationContext,
-    _bpf_worker: BPFWorker,
-    _config: Config,
+    app_context: ApplicationContext<JsonProfileConverter>,
+    bpf_worker: Option<JoinHandle<Result<()>>>,
     running_flag: Arc<AtomicBool>,
     current_event_sort_field: SortEventField,
     current_event_sort_order: SortOrder,
@@ -31,13 +42,40 @@ struct App {
 }
 
 impl App {
+    /// Initializes the application: creates the BPF worker thread, builds the
+    /// [`ApplicationContext`], and sets default sort state.
+    ///
+    /// # Errors
+    /// Returns an error if the application context fails to initialize.
     fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Result<App> {
+        let converter = JsonProfileConverter;
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-        let running_flag = Arc::new(AtomicBool::new(true));
-        let (tx, rx) = mpsc::channel();
-        let (block_tx, block_rx) = mpsc::channel();
-        let bpf_worker = BPFWorker::new(config.target_pid, tx, block_rx, running_flag.clone());
-        let mut app_context = ApplicationContext::new(&config, rx, block_tx, running_flag.clone())?;
+        let running_flag = config.running_flag.clone();
+        let bpf_worker_running_flag = config.running_flag.clone();
+        let bpf_worker_bpf_program = config.bpf_program.clone();
+
+        let bpf_worker = std::thread::spawn(move || -> Result<()> {
+            let ringbuffer_res = bpf_worker_bpf_program.build_ringbuffer();
+            match ringbuffer_res {
+                Ok(ringbuffer) => {
+                    while bpf_worker_running_flag.load(Ordering::Relaxed) {
+                        match ringbuffer.poll(Duration::from_millis(200)) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                tracing::error!("[BPF Polling Thread]: {:?}", err);
+                                bpf_worker_running_flag.store(false, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("[BPF Polling Thread]: {:?}", err);
+                    bpf_worker_running_flag.store(false, Ordering::Relaxed);
+                }
+            }
+            Ok(())
+        });
+        let mut app_context = ApplicationContext::new(converter, config)?;
 
         let current_event_sort_field = SortEventField::Timestamp;
         let current_metric_sort_field = SortMetricField::Count;
@@ -48,8 +86,7 @@ impl App {
         app_context.set_metric_sort_field(current_metric_sort_field);
         Ok(App {
             app_context,
-            _bpf_worker: bpf_worker,
-            _config: config,
+            bpf_worker: Some(bpf_worker),
             running_flag,
             current_event_sort_field,
             current_event_sort_order,
@@ -58,6 +95,10 @@ impl App {
         })
     }
 
+    /// Renders a sortable column header button for the connections table.
+    ///
+    /// Clicking toggles sort order if this field is already active,
+    /// or switches to this field with ascending order otherwise.
     fn connections_panel_button(&mut self, ui: &mut egui::Ui, field: SortEventField) {
         let button_name: &str = match field {
             SortEventField::Ip => "Address",
@@ -65,6 +106,7 @@ impl App {
             SortEventField::Tgid => "TGID",
             SortEventField::Port => "Port",
             SortEventField::Timestamp => "Time",
+            SortEventField::L4Protocol => "L4 Protocol",
         };
         if self.current_event_sort_field == field {
             if ui.button(button_name).highlight().clicked() {
@@ -82,6 +124,10 @@ impl App {
         }
     }
 
+    /// Renders a sortable column header button for the address statistics table.
+    ///
+    /// Clicking toggles sort order if this field is already active,
+    /// or switches to this field with ascending order otherwise.
     fn ip_metrics_panel_button(&mut self, ui: &mut egui::Ui, field: SortMetricField) {
         let button_name: &str = match field {
             SortMetricField::Ip => "Address",
@@ -104,6 +150,9 @@ impl App {
         }
     }
 
+    /// Renders the left panel: a sortable table of recent connection events.
+    ///
+    /// Blocked connections are highlighted with a red background.
     fn connections_panel(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, width: f32) {
         let max_events_log_size = self.app_context.get_max_events_log_size();
         // левая панель — список соединений
@@ -120,66 +169,96 @@ impl App {
                         });
                     });
                     ui.separator();
-                    TableBuilder::new(ui)
-                        .striped(true)
-                        .resizable(false)
-                        .column(Column::exact(50.0)) // PID
-                        .column(Column::exact(50.0)) // TGID
-                        .column(Column::remainder()) // IP — занимает остаток
-                        .column(Column::exact(60.0)) // Port
-                        .column(Column::exact(130.0)) // Timestamp
-                        .header(20.0, |mut header| {
-                            header.col(|ui| {
-                                self.connections_panel_button(ui, SortEventField::Pid);
-                            });
-                            header.col(|ui| {
-                                self.connections_panel_button(ui, SortEventField::Tgid);
-                            });
-                            header.col(|ui| {
-                                self.connections_panel_button(ui, SortEventField::Ip);
-                            });
-                            header.col(|ui| {
-                                self.connections_panel_button(ui, SortEventField::Port);
-                            });
-                            header.col(|ui| {
-                                self.connections_panel_button(ui, SortEventField::Timestamp);
-                            });
-                        })
-                        .body(|body| {
-                            let events: Vec<&DisplayEvent> = self
-                                .app_context
-                                .get_sorted_events_list()
-                                .iter(self.current_event_sort_order)
-                                .collect();
-                            body.rows(18.0, events.len(), |mut row| {
-                                let event = &events[row.index()];
-                                row.col(|ui| {
-                                    ui.monospace(&event.pid);
+                    ui.scope(|ui| {
+                        ui.visuals_mut().selection.bg_fill =
+                            egui::Color32::from_rgba_unmultiplied(255, 50, 50, 40);
+                        TableBuilder::new(ui)
+                            .striped(true)
+                            .resizable(false)
+                            .column(Column::exact(50.0)) // PID
+                            .column(Column::exact(50.0)) // TGID
+                            .column(Column::exact(100.0)) // L4 Protocol
+                            .column(Column::remainder()) // IP — занимает остаток
+                            .column(Column::exact(60.0)) // Port
+                            .column(Column::exact(130.0)) // Timestamp
+                            .header(20.0, |mut header| {
+                                header.col(|ui| {
+                                    self.connections_panel_button(ui, SortEventField::Pid);
                                 });
-                                row.col(|ui| {
-                                    ui.monospace(&event.tgid);
+                                header.col(|ui| {
+                                    self.connections_panel_button(ui, SortEventField::Tgid);
                                 });
-                                row.col(|ui| {
-                                    ui.monospace(&event.ip);
+                                header.col(|ui| {
+                                    self.connections_panel_button(ui, SortEventField::L4Protocol);
                                 });
-                                row.col(|ui| {
-                                    ui.monospace(&event.port);
+                                header.col(|ui| {
+                                    self.connections_panel_button(ui, SortEventField::Ip);
                                 });
-                                row.col(|ui| {
-                                    ui.label(&event.timestamp);
+                                header.col(|ui| {
+                                    self.connections_panel_button(ui, SortEventField::Port);
+                                });
+                                header.col(|ui| {
+                                    self.connections_panel_button(ui, SortEventField::Timestamp);
+                                });
+                            })
+                            .body(|body| {
+                                let events: Vec<&DisplayEvent> = self
+                                    .app_context
+                                    .get_sorted_events_list()
+                                    .iter(self.current_event_sort_order)
+                                    .collect();
+                                body.rows(18.0, events.len(), |mut row| {
+                                    let event = &events[row.index()];
+                                    if event.raw_event.event_status == EventStatus::Block {
+                                        row.set_selected(true);
+                                    }
+                                    row.col(|ui| {
+                                        //ui.visuals_mut().selection.bg_fill = egui::Color32::from_rgba_unmultiplied(255, 50, 50, 40);
+                                        ui.monospace(&event.pid);
+                                    });
+                                    row.col(|ui| {
+                                        ui.monospace(&event.tgid);
+                                    });
+                                    row.col(|ui| {
+                                        ui.monospace(&event.l4_protocol);
+                                    });
+                                    row.col(|ui| {
+                                        ui.monospace(&event.ip);
+                                    });
+                                    row.col(|ui| {
+                                        ui.monospace(&event.port);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(&event.timestamp);
+                                    });
                                 });
                             });
-                        })
+                    });
                 });
             });
     }
 
+    /// Renders the bottom-right panel: base profile selector, summary statistics,
+    /// and the export profile button.
     fn summary_panel(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, height: f32) {
+        let mut mode = self.app_context.get_current_base_profile();
         let metrics = self.app_context.get_metrics();
         // правая нижняя — summary
         egui::Panel::bottom("summary_panel")
             .exact_size(height)
             .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Excludes list");
+                    ui.label("Mode:");
+                    ui.selectable_value(&mut mode, BaseProfile::PassAll, "Pass All");
+                    ui.selectable_value(&mut mode, BaseProfile::DenyAll, "Deny All");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Export profile").clicked() {
+                            self.app_context.export_profile();
+                        }
+                    });
+                });
+                ui.separator();
                 ui.label("Summary");
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -194,8 +273,13 @@ impl App {
                     });
                 });
             });
+        if mode != self.app_context.get_current_base_profile() {
+            self.app_context.set_current_base_profile(mode);
+        }
     }
 
+    /// Renders the top-right panel: a sortable address statistics table
+    /// with add/remove block list buttons per address.
     fn address_statisstics_panel(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // правая верхняя — статистика адресов
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -206,7 +290,7 @@ impl App {
                 .resizable(false)
                 .column(Column::remainder()) // PID
                 .column(Column::exact(80.0))
-                .column(Column::exact(80.0))
+                .column(Column::exact(120.0))
                 .header(20.0, |mut header| {
                     header.col(|ui| {
                         self.ip_metrics_panel_button(ui, SortMetricField::Ip);
@@ -233,13 +317,13 @@ impl App {
                             ui.monospace(&metric.events_count);
                         });
                         row.col(|ui| {
-                            if self.app_context.is_blocked(&metric.ip_addr) {
-                                if ui.button("Unblock").clicked() {
-                                    self.app_context.unblock(metric.ip_addr);
+                            if self.app_context.is_in_profile(&metric.ip_addr) {
+                                if ui.button("Remove from list").clicked() {
+                                    self.app_context.remove_from_profile(metric.ip_addr);
                                 }
                             } else {
-                                if ui.button("Block").clicked() {
-                                    self.app_context.block(metric.ip_addr);
+                                if ui.button("Add to list").clicked() {
+                                    self.app_context.add_to_profile(metric.ip_addr);
                                 }
                             }
                         });
@@ -252,6 +336,9 @@ impl App {
 impl eframe::App for App {
     fn on_exit(&mut self) {
         self.running_flag.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.bpf_worker.take() {
+            let _ = handle.join();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -268,6 +355,7 @@ impl eframe::App for App {
         self.connections_panel(ui, frame, left_width);
         self.summary_panel(ui, frame, right_height_bottom);
         self.address_statisstics_panel(ui, frame);
+        ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
 
@@ -284,11 +372,17 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let app_config = Config {
-        max_events_log_size: 100000,
-        max_events_block_size: 1000,
-        target_pid: args.target_pid,
-    };
+    let mut app_config_builder = ConfigBuilder::default()
+        .base_profile(netlogger_rs::bpf::BaseProfile::DenyAll)
+        .max_events_block_size(1000)
+        .max_events_log_size(100000)
+        .target_pid(args.target_pid);
+
+    if let Some(profile_path) = args.profile_path {
+        app_config_builder = app_config_builder.profile_path(profile_path);
+    }
+
+    let app_config = app_config_builder.build()?;
 
     eframe::run_native(
         "netlogger-rs",
